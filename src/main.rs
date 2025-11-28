@@ -1,102 +1,173 @@
-use gif::{Encoder, ExtensionData, Frame, Repeat};
+use gif::{Frame, Repeat};
 use image::RgbaImage;
-use std::borrow::Cow;
 use std::fs::File;
 use std::path::Path;
 
+mod hittable;
+mod plane;
 mod ray;
 mod save_image;
 mod scene;
 mod sphere;
 mod vector3d;
 
+use crate::plane::Plane;
 use crate::save_image::save_image;
-use crate::scene::Camera;
-use crate::scene::Light;
-use crate::scene::Scene;
-use crate::sphere::Color;
-use crate::sphere::Material;
-use crate::sphere::Sphere;
+use crate::scene::{Camera, Light, Scene};
+use crate::sphere::{Color, Material, Sphere};
 use crate::vector3d::Vector3D;
 
 fn main() {
-    let width: u32 = 800;
-    let height: u32 = 600;
-    let num_frames: i32 = 36;
-    let output_file: &str = "animation.gif";
+    let width = 800;
+    let height = 600;
+    let num_frames = 36;
+    let samples = 2;
+    let output_file = "animation.gif";
 
-    let mut scene: Scene = Scene {
-        spheres: Vec::new(),
-        lights: Vec::new(),
+    println!("Rendering {} frames at {}x{} with {} samples per pixel",
+             num_frames, width, height, samples);
+    println!("Using parallel rendering with rayon...");
+
+    // Create scene with enhanced materials
+    let mut scene = Scene {
         background_color: Color {
-            r: 0.8,
-            g: 0.8,
-            b: 0.8,
-        }, // Light gray background color
+            r: 0.2,
+            g: 0.3,
+            b: 0.5,
+        },
+        objects: Vec::new(),
+        lights: Vec::new(),
     };
 
-    let camera: Camera = Camera {
-        position: Vector3D {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
-        target: Vector3D {
-            x: 0.0,
-            y: 0.0,
-            z: 1.0,
-        },
-        rotation_angle: 0.0,
-    };
-
-    let sphere1: Sphere = Sphere {
-        center: Vector3D {
-            x: 0.0,
-            y: 0.0,
-            z: 4.0,
-        },
-        radius: 1.0,
-        material: Material {
+    // Add ground plane
+    let ground = Plane::new(
+        Vector3D::new(0.0, -1.0, 0.0),
+        Vector3D::new(0.0, 1.0, 0.0),
+        Material {
             color: Color {
-                r: 0.4,
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+            },
+            diffuse: 0.8,
+            specular: 0.1,
+            shininess: 10.0,
+            reflectivity: 0.1,
+        },
+    );
+    scene.add_object(Box::new(ground));
+
+    // Add central blue sphere (matte)
+    let sphere1 = Sphere::new(
+        Vector3D::new(0.0, 0.0, 5.0),
+        1.0,
+        Material {
+            color: Color {
+                r: 0.2,
                 g: 0.4,
                 b: 1.0,
-            }, // Blue color
-            diffuse: 0.2,
+            },
+            diffuse: 0.7,
+            specular: 0.3,
+            shininess: 32.0,
+            reflectivity: 0.1,
         },
-    };
+    );
+    scene.add_object(Box::new(sphere1));
 
-    scene.spheres.push(sphere1);
+    // Add red reflective sphere
+    let sphere2 = Sphere::new(
+        Vector3D::new(-2.5, 0.5, 4.0),
+        0.8,
+        Material {
+            color: Color {
+                r: 1.0,
+                g: 0.2,
+                b: 0.2,
+            },
+            diffuse: 0.3,
+            specular: 0.9,
+            shininess: 100.0,
+            reflectivity: 0.6,
+        },
+    );
+    scene.add_object(Box::new(sphere2));
 
-    let mut frames: Vec<RgbaImage> = Vec::new();
+    // Add green sphere
+    let sphere3 = Sphere::new(
+        Vector3D::new(2.5, 0.3, 4.5),
+        0.7,
+        Material {
+            color: Color {
+                r: 0.2,
+                g: 1.0,
+                b: 0.3,
+            },
+            diffuse: 0.6,
+            specular: 0.5,
+            shininess: 64.0,
+            reflectivity: 0.2,
+        },
+    );
+    scene.add_object(Box::new(sphere3));
+
+    // Add small yellow sphere
+    let sphere4 = Sphere::new(
+        Vector3D::new(0.0, 1.5, 3.5),
+        0.4,
+        Material {
+            color: Color {
+                r: 1.0,
+                g: 0.9,
+                b: 0.2,
+            },
+            diffuse: 0.5,
+            specular: 0.8,
+            shininess: 128.0,
+            reflectivity: 0.4,
+        },
+    );
+    scene.add_object(Box::new(sphere4));
+
+    // Create camera with proper FOV
+    let aspect_ratio = width as f64 / height as f64;
+    let camera = Camera::new(
+        Vector3D::new(0.0, 1.0, 0.0),
+        Vector3D::new(0.0, 0.5, 5.0),
+        60.0,
+        aspect_ratio,
+    );
+
+    let mut frames = Vec::new();
 
     for frame_index in 0..num_frames {
-        // Calculate the light position or any other scene changes for the current frame
-        let angle: f64 = frame_index as f64 * 2.0 * std::f64::consts::PI / num_frames as f64;
-        let light_x: f64 = angle.cos() * 2.0;
-        let light_y: f64 = angle.sin() * 2.0;
-        let light_z: f64 = 1.0;
-        let light_intensity: f64 = 10.0;
-        let light: Light = Light {
-            position: Vector3D {
-                x: light_x,
-                y: light_y,
-                z: light_z,
-            },
-            intensity: light_intensity,
-        };
+        println!("Rendering frame {}/{}...", frame_index + 1, num_frames);
+
+        // Animate rotating light
+        let angle = frame_index as f64 * 2.0 * std::f64::consts::PI / num_frames as f64;
+        let light_x = angle.cos() * 3.0;
+        let light_z = 5.0 + angle.sin() * 2.0;
+        let light_y = 2.0 + angle.sin() * 0.5;
 
         scene.lights.clear();
-        scene.lights.push(light);
+        scene.lights.push(Light {
+            position: Vector3D::new(light_x, light_y, light_z),
+            intensity: 1.0,
+        });
 
-        let image: Vec<Vec<Color>> = scene.trace(&camera, width, height);
+        // Add a secondary static light
+        scene.lights.push(Light {
+            position: Vector3D::new(-3.0, 4.0, 2.0),
+            intensity: 0.5,
+        });
 
-        let mut frame_buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-            RgbaImage::new(width, height);
+        let image = scene.trace(&camera, width, height, samples);
+
+        let mut frame_buffer = RgbaImage::new(width, height);
 
         for (x, y, pixel) in frame_buffer.enumerate_pixels_mut() {
-            let color: &Color = &image[y as usize][x as usize];
-            let rgba_color: image::Rgba<u8> = image::Rgba([
+            let color = &image[y as usize][x as usize];
+            let rgba_color = image::Rgba([
                 (color.r * 255.0) as u8,
                 (color.g * 255.0) as u8,
                 (color.b * 255.0) as u8,
@@ -105,34 +176,31 @@ fn main() {
             *pixel = rgba_color;
         }
 
-        let filename: String = format!("frame_{}.ppm", frame_index);
+        let filename = format!("frame_{}.ppm", frame_index);
         let _ = save_image(&image, width, height, &filename);
 
         frames.push(frame_buffer);
     }
 
-    // Save the frames as a GIF animation
-    let path: &Path = Path::new(output_file);
-    let file: File = File::create(&path).unwrap();
-    let color_map: &[u8; 0] = &[];
-
-    let mut encoder: Encoder<File> =
-        Encoder::new(file, width as u16, height as u16, color_map).unwrap();
-
-    encoder
-        .write_extension(ExtensionData::Repetitions(Repeat::Infinite))
-        .unwrap();
-
-    let mut frame_data: Vec<u8> = Vec::new();
-
+    let path = Path::new(output_file);
+    let file = File::create(&path).unwrap();
+    let mut encoder = gif::Encoder::new(file, width as u16, height as u16, &[]).unwrap();
     encoder.set_repeat(Repeat::Infinite).unwrap();
 
-    for frame in frames {
-        let mut gif_frame: Frame<'_> = Frame::default();
-        gif_frame.width = width as u16;
-        gif_frame.height = height as u16;
-        frame_data.extend_from_slice(&frame.into_raw()[..]);
-        gif_frame.buffer = Cow::Borrowed(&frame_data[..]);
+    for (i, frame) in frames.iter().enumerate() {
+        println!("Encoding frame {}/{}...", i + 1, num_frames);
+
+        let rgba_data = frame.as_raw();
+        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+
+        for chunk in rgba_data.chunks(4) {
+            rgb_data.push(chunk[0]);
+            rgb_data.push(chunk[1]);
+            rgb_data.push(chunk[2]);
+        }
+
+        let mut gif_frame = Frame::from_rgb(width as u16, height as u16, &rgb_data);
+        gif_frame.delay = 3;
         encoder.write_frame(&gif_frame).unwrap();
     }
 

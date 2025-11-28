@@ -1,3 +1,4 @@
+use crate::hittable::{HitRecord, Hittable};
 use crate::ray::Ray;
 use crate::vector3d::Vector3D;
 use std::ops::{Add, Mul};
@@ -12,6 +13,7 @@ pub struct Color {
 impl Mul<f64> for Color {
     type Output = Self;
 
+    #[inline]
     fn mul(self, scalar: f64) -> Self {
         Color {
             r: self.r * scalar,
@@ -24,6 +26,7 @@ impl Mul<f64> for Color {
 impl Add for Color {
     type Output = Self;
 
+    #[inline]
     fn add(self, other: Self) -> Self {
         Color {
             r: self.r + other.r,
@@ -37,6 +40,9 @@ impl Add for Color {
 pub struct Material {
     pub color: Color,
     pub diffuse: f64,
+    pub specular: f64,
+    pub shininess: f64,
+    pub reflectivity: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,21 +60,38 @@ impl Sphere {
             material,
         }
     }
+}
 
-    pub fn hit(&self, ray: &Ray) -> Option<(Vector3D, Vector3D)> {
-        let oc: Vector3D = ray.origin - self.center;
-        let a: f64 = ray.direction.dot(ray.direction);
-        let b: f64 = 2.0 * oc.dot(ray.direction);
-        let c: f64 = oc.dot(oc) - self.radius * self.radius;
-        let discriminant: f64 = b * b - 4.0 * a * c;
+impl Hittable for Sphere {
+    fn hit(&self, ray: &Ray, t_min: f64, t_max: f64) -> Option<HitRecord> {
+        let oc = ray.origin - self.center;
+        let a = ray.direction.dot(ray.direction);
+        let half_b = oc.dot(ray.direction);
+        let c = oc.dot(oc) - self.radius * self.radius;
+        let discriminant = half_b * half_b - a * c;
 
         if discriminant < 0.0 {
-            None
-        } else {
-            let t: f64 = (-b - discriminant.sqrt()) / (2.0 * a);
-            let point: Vector3D = ray.origin + t * ray.direction;
-            let normal: Vector3D = (point - self.center).normalize();
-            Some((point, normal))
+            return None;
         }
+
+        let sqrtd = discriminant.sqrt();
+        let mut root = (-half_b - sqrtd) / a;
+
+        if root < t_min || root > t_max {
+            root = (-half_b + sqrtd) / a;
+            if root < t_min || root > t_max {
+                return None;
+            }
+        }
+
+        let point = ray.at(root);
+        let normal = (point - self.center) * (1.0 / self.radius);
+
+        Some(HitRecord {
+            point,
+            normal,
+            t: root,
+            material: self.material,
+        })
     }
 }

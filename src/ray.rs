@@ -7,11 +7,12 @@ pub struct Ray {
 }
 
 impl Ray {
+    #[inline]
     pub fn new(origin: Vector3D, direction: Vector3D) -> Ray {
         Ray { origin, direction }
     }
 
-    // p(t) = origin + t * direction
+    #[inline]
     pub fn at(&self, t: f64) -> Vector3D {
         self.origin + (self.direction * t)
     }

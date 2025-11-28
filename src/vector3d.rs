@@ -1,14 +1,17 @@
 use std::ops::{Add, Mul, Sub};
 
 impl Vector3D {
+    #[inline]
     pub fn new(x: f64, y: f64, z: f64) -> Vector3D {
         Vector3D { x, y, z }
     }
 
+    #[inline]
     pub fn dot(self, other: Vector3D) -> f64 {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
 
+    #[inline]
     pub fn cross(self, other: Vector3D) -> Vector3D {
         Vector3D::new(
             self.y * other.z - self.z * other.y,
@@ -17,16 +20,23 @@ impl Vector3D {
         )
     }
 
+    #[inline]
     pub fn magnitude(self) -> f64 {
-        (self.x.powi(2) + self.y.powi(2) + self.z.powi(2)).sqrt()
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
     }
 
+    #[inline]
+    pub fn magnitude_squared(self) -> f64 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    #[inline]
     pub fn normalize(self) -> Vector3D {
-        let mag: f64 = self.magnitude();
+        let inv_mag = 1.0 / self.magnitude();
         Vector3D {
-            x: self.x / mag,
-            y: self.y / mag,
-            z: self.z / mag,
+            x: self.x * inv_mag,
+            y: self.y * inv_mag,
+            z: self.z * inv_mag,
         }
     }
 }
@@ -34,6 +44,7 @@ impl Vector3D {
 impl Add for Vector3D {
     type Output = Self;
 
+    #[inline]
     fn add(self, other: Self) -> Self {
         Vector3D {
             x: self.x + other.x,
@@ -46,6 +57,7 @@ impl Add for Vector3D {
 impl Sub for Vector3D {
     type Output = Self;
 
+    #[inline]
     fn sub(self, other: Self) -> Self {
         Vector3D {
             x: self.x - other.x,
@@ -58,6 +70,7 @@ impl Sub for Vector3D {
 impl Mul<f64> for Vector3D {
     type Output = Self;
 
+    #[inline]
     fn mul(self, scalar: f64) -> Self {
         Vector3D {
             x: self.x * scalar,
@@ -70,6 +83,7 @@ impl Mul<f64> for Vector3D {
 impl Mul<Vector3D> for f64 {
     type Output = Vector3D;
 
+    #[inline]
     fn mul(self, vec: Vector3D) -> Vector3D {
         Vector3D {
             x: self * vec.x,
