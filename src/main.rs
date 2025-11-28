@@ -3,6 +3,7 @@ use image::RgbaImage;
 use std::fs::File;
 use std::path::Path;
 
+mod gpu_renderer;
 mod hittable;
 mod plane;
 mod ray;
@@ -18,6 +19,19 @@ use crate::sphere::{Color, Material, Sphere};
 use crate::vector3d::Vector3D;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let use_gpu = args.len() > 1 && args[1] == "--gpu";
+
+    if use_gpu {
+        println!("Using GPU rendering");
+        pollster::block_on(main_gpu());
+    } else {
+        println!("Using CPU rendering (use --gpu for GPU mode)");
+        main_cpu();
+    }
+}
+
+fn main_cpu() {
     let width = 800;
     let height = 600;
     let num_frames = 36;
@@ -200,6 +214,117 @@ fn main() {
         }
 
         let mut gif_frame = Frame::from_rgb(width as u16, height as u16, &rgb_data);
+        gif_frame.delay = 3;
+        encoder.write_frame(&gif_frame).unwrap();
+    }
+
+    println!("Animation saved as {}", output_file);
+}
+
+async fn main_gpu() {
+    use crate::gpu_renderer::GpuRenderer;
+
+    let width = 1920;
+    let height = 1080;
+    let num_frames = 36;
+    let samples = 16;
+    let output_file = "animation_gpu.gif";
+
+    println!("Rendering {} frames at {}x{} with {} samples per pixel",
+             num_frames, width, height, samples);
+
+    let renderer = GpuRenderer::new().await;
+
+    let mut frames = Vec::new();
+
+    for frame_index in 0..num_frames {
+        println!("Rendering frame {}/{}...", frame_index + 1, num_frames);
+
+        let angle = frame_index as f32 * 2.0 * std::f32::consts::PI / num_frames as f32;
+        let light_x = angle.cos() * 3.0;
+        let light_z = 5.0 + angle.sin() * 2.0;
+        let light_y = 2.0 + angle.sin() * 0.5;
+
+        let spheres_data = vec![
+            (
+                ([0.0, 0.0, 5.0], 1.0),
+                ([0.2, 0.4, 1.0], 0.7, 0.3, 32.0, 0.1),
+            ),
+            (
+                ([-2.5, 0.5, 4.0], 0.8),
+                ([1.0, 0.2, 0.2], 0.3, 0.9, 100.0, 0.6),
+            ),
+            (
+                ([2.5, 0.3, 4.5], 0.7),
+                ([0.2, 1.0, 0.3], 0.6, 0.5, 64.0, 0.2),
+            ),
+            (
+                ([0.0, 1.5, 3.5], 0.4),
+                ([1.0, 0.9, 0.2], 0.5, 0.8, 128.0, 0.4),
+            ),
+        ];
+
+        let planes_data = vec![
+            (
+                ([0.0, -1.0, 0.0], [0.0, 1.0, 0.0]),
+                ([0.5, 0.5, 0.5], 0.8, 0.1, 10.0, 0.1),
+            ),
+        ];
+
+        let lights_data = vec![
+            ([light_x, light_y, light_z], 1.0),
+            ([-3.0, 4.0, 2.0], 0.5),
+        ];
+
+        let background_color = [0.2, 0.3, 0.5];
+
+        let image = renderer.render(
+            width,
+            height,
+            samples,
+            [0.0, 1.0, 0.0],
+            [0.0, 0.5, 5.0],
+            60.0,
+            &spheres_data,
+            &planes_data,
+            &lights_data,
+            background_color,
+        );
+
+        let mut frame_buffer = RgbaImage::new(width, height);
+        for (x, y, pixel) in frame_buffer.enumerate_pixels_mut() {
+            let color = &image[y as usize][x as usize];
+            *pixel = image::Rgba([
+                (color[0] * 255.0) as u8,
+                (color[1] * 255.0) as u8,
+                (color[2] * 255.0) as u8,
+                255,
+            ]);
+        }
+
+        frames.push(frame_buffer);
+    }
+
+    println!("Encoding GIF...");
+
+    let path = Path::new(output_file);
+    let file = File::create(&path).unwrap();
+    let mut encoder = gif::Encoder::new(file, width as u16, height as u16, &[]).unwrap();
+    encoder.set_repeat(gif::Repeat::Infinite).unwrap();
+
+    for (i, frame) in frames.iter().enumerate() {
+        println!("Encoding frame {}/{}...", i + 1, num_frames);
+
+        let rgba_data = frame.as_raw();
+        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+
+        for chunk in rgba_data.chunks(4) {
+            rgb_data.push(chunk[0]);
+            rgb_data.push(chunk[1]);
+            rgb_data.push(chunk[2]);
+        }
+
+        let mut gif_frame = gif::Frame::from_rgb(width as u16, height as u16, &rgb_data);
         gif_frame.delay = 3;
         encoder.write_frame(&gif_frame).unwrap();
     }
