@@ -1,5 +1,27 @@
 use bytemuck::{Pod, Zeroable};
+use std::fmt;
 use wgpu::util::DeviceExt;
+
+#[derive(Debug)]
+pub enum GpuError {
+    NoAdapter,
+    DeviceRequest(wgpu::RequestDeviceError),
+    OutOfMemory { requested_mb: f64 },
+}
+
+impl fmt::Display for GpuError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GpuError::NoAdapter => write!(f, "No compatible GPU adapter found"),
+            GpuError::DeviceRequest(e) => write!(f, "Failed to request GPU device: {}", e),
+            GpuError::OutOfMemory { requested_mb } => {
+                write!(f, "Insufficient GPU memory: {:.1}MB required (try lower resolution or fewer samples)", requested_mb)
+            }
+        }
+    }
+}
+
+impl std::error::Error for GpuError {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -71,10 +93,18 @@ pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    memory_info: MemoryInfo,
+    adapter_info: wgpu::AdapterInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryInfo {
+    pub total_allocated_mb: f64,
+    pub peak_allocated_mb: f64,
 }
 
 impl GpuRenderer {
-    pub async fn new() -> Self {
+    pub async fn new() -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -87,7 +117,9 @@ impl GpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("Failed to find adapter");
+            .ok_or(GpuError::NoAdapter)?;
+
+        let adapter_info = adapter.get_info();
 
         let (device, queue) = adapter
             .request_device(
@@ -99,7 +131,7 @@ impl GpuRenderer {
                 None,
             )
             .await
-            .expect("Failed to create device");
+            .map_err(GpuError::DeviceRequest)?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Ray Tracer Shader"),
@@ -185,15 +217,50 @@ impl GpuRenderer {
             entry_point: "main",
         });
 
-        Self {
+        Ok(Self {
             device,
             queue,
             pipeline,
-        }
+            memory_info: MemoryInfo {
+                total_allocated_mb: 0.0,
+                peak_allocated_mb: 0.0,
+            },
+            adapter_info,
+        })
+    }
+
+    pub fn memory_info(&self) -> &MemoryInfo {
+        &self.memory_info
+    }
+
+    pub fn gpu_name(&self) -> &str {
+        &self.adapter_info.name
+    }
+
+    fn calculate_memory_usage(
+        &self,
+        width: u32,
+        height: u32,
+        num_spheres: usize,
+        num_planes: usize,
+        num_lights: usize,
+    ) -> f64 {
+        let output_size = (width * height * 16) as u64;
+        let staging_size = output_size;
+        let params_size = std::mem::size_of::<RenderParams>() as u64;
+        let camera_size = std::mem::size_of::<GpuCamera>() as u64;
+        let spheres_size = (num_spheres * std::mem::size_of::<GpuSphere>()) as u64;
+        let planes_size = (num_planes * std::mem::size_of::<GpuPlane>()) as u64;
+        let lights_size = (num_lights * std::mem::size_of::<GpuLight>()) as u64;
+
+        let total_bytes = output_size + staging_size + params_size + camera_size
+                        + spheres_size + planes_size + lights_size;
+
+        total_bytes as f64 / (1024.0 * 1024.0)
     }
 
     pub fn render(
-        &self,
+        &mut self,
         width: u32,
         height: u32,
         samples: u32,
@@ -204,7 +271,25 @@ impl GpuRenderer {
         planes_data: &[(([f32; 3], [f32; 3]), ([f32; 3], f32, f32, f32, f32))],
         lights_data: &[([f32; 3], f32)],
         background_color: [f32; 3],
-    ) -> Vec<Vec<[f32; 3]>> {
+    ) -> Result<Vec<Vec<[f32; 3]>>, GpuError> {
+        let memory_mb = self.calculate_memory_usage(
+            width, height,
+            spheres_data.len(),
+            planes_data.len(),
+            lights_data.len()
+        );
+
+        // Check against 2GB limit
+        const MAX_MEMORY_MB: f64 = 2048.0;
+        if memory_mb > MAX_MEMORY_MB {
+            return Err(GpuError::OutOfMemory { requested_mb: memory_mb });
+        }
+
+        self.memory_info.total_allocated_mb = memory_mb;
+        if memory_mb > self.memory_info.peak_allocated_mb {
+            self.memory_info.peak_allocated_mb = memory_mb;
+        }
+
         let aspect_ratio = width as f32 / height as f32;
 
         let gpu_camera = GpuCamera {
@@ -404,6 +489,47 @@ impl GpuRenderer {
         drop(data);
         staging_buffer.unmap();
 
-        image
+        Ok(image)
+    }
+
+    pub fn render_adaptive(
+        &mut self,
+        width: u32,
+        height: u32,
+        target_samples: u32,
+        camera_pos: [f32; 3],
+        camera_target: [f32; 3],
+        fov: f32,
+        spheres_data: &[(([f32; 3], f32), ([f32; 3], f32, f32, f32, f32))],
+        planes_data: &[(([f32; 3], [f32; 3]), ([f32; 3], f32, f32, f32, f32))],
+        lights_data: &[([f32; 3], f32)],
+        background_color: [f32; 3],
+        progress_callback: &dyn Fn(u32, u32),
+    ) -> Result<Vec<Vec<[f32; 3]>>, GpuError> {
+        let sample_steps = [1, 2, 4, 8, target_samples];
+        let mut final_image = vec![vec![[0.0, 0.0, 0.0]; width as usize]; height as usize];
+
+        for &samples in &sample_steps {
+            if samples > target_samples {
+                break;
+            }
+
+            progress_callback(samples, target_samples);
+
+            final_image = self.render(
+                width,
+                height,
+                samples,
+                camera_pos,
+                camera_target,
+                fov,
+                spheres_data,
+                planes_data,
+                lights_data,
+                background_color,
+            )?;
+        }
+
+        Ok(final_image)
     }
 }

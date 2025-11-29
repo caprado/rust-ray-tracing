@@ -20,11 +20,12 @@ use crate::vector3d::Vector3D;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let use_gpu = args.len() > 1 && args[1] == "--gpu";
+    let use_gpu = args.contains(&"--gpu".to_string());
+    let use_adaptive = args.contains(&"--adaptive".to_string());
 
     if use_gpu {
         println!("Using GPU rendering");
-        pollster::block_on(main_gpu());
+        pollster::block_on(main_gpu(use_adaptive));
     } else {
         println!("Using CPU rendering (use --gpu for GPU mode)");
         main_cpu();
@@ -32,12 +33,10 @@ fn main() {
 }
 
 fn main_cpu() {
-    let width = 800;
-    let height = 600;
-    let num_frames = 36;
-    let samples = 2;
-    let output_file = "animation.gif";
+    main_cpu_with_settings(800, 600, 36, 2, "animation.gif");
+}
 
+fn main_cpu_with_settings(width: u32, height: u32, num_frames: usize, samples: u32, output_file: &str) {
     println!("Rendering {} frames at {}x{} with {} samples per pixel",
              num_frames, width, height, samples);
     println!("Using parallel rendering with rayon...");
@@ -221,7 +220,7 @@ fn main_cpu() {
     println!("Animation saved as {}", output_file);
 }
 
-async fn main_gpu() {
+async fn main_gpu(use_adaptive: bool) {
     use crate::gpu_renderer::GpuRenderer;
 
     let width = 1920;
@@ -230,14 +229,29 @@ async fn main_gpu() {
     let samples = 16;
     let output_file = "animation_gpu.gif";
 
-    println!("Rendering {} frames at {}x{} with {} samples per pixel",
-             num_frames, width, height, samples);
+    println!("Rendering {} frames at {}x{} with {} samples per pixel{}",
+             num_frames, width, height, samples,
+             if use_adaptive { " (adaptive quality)" } else { "" });
 
-    let renderer = GpuRenderer::new().await;
+    let mut renderer = match GpuRenderer::new().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("GPU initialization failed: {}", e);
+            eprintln!("Falling back to CPU rendering...");
+            return main_cpu_with_settings(width, height, num_frames, samples, output_file);
+        }
+    };
+
+    println!("Using GPU: {}", renderer.gpu_name());
 
     let mut frames = Vec::new();
 
     for frame_index in 0..num_frames {
+        if frame_index == 0 {
+            let mem_info = renderer.memory_info();
+            println!("GPU memory per frame: {:.1}MB", mem_info.total_allocated_mb);
+        }
+
         println!("Rendering frame {}/{}...", frame_index + 1, num_frames);
 
         let angle = frame_index as f32 * 2.0 * std::f32::consts::PI / num_frames as f32;
@@ -278,18 +292,52 @@ async fn main_gpu() {
 
         let background_color = [0.2, 0.3, 0.5];
 
-        let image = renderer.render(
-            width,
-            height,
-            samples,
-            [0.0, 1.0, 0.0],
-            [0.0, 0.5, 5.0],
-            60.0,
-            &spheres_data,
-            &planes_data,
-            &lights_data,
-            background_color,
-        );
+        let image = if use_adaptive {
+            match renderer.render_adaptive(
+                width,
+                height,
+                samples,
+                [0.0, 1.0, 0.0],
+                [0.0, 0.5, 5.0],
+                60.0,
+                &spheres_data,
+                &planes_data,
+                &lights_data,
+                background_color,
+                &|current, target| {
+                    if current < target {
+                        println!("  Progressive quality: {}/{} samples", current, target);
+                    }
+                },
+            ) {
+                Ok(img) => img,
+                Err(e) => {
+                    eprintln!("GPU rendering failed: {}", e);
+                    eprintln!("Falling back to CPU rendering...");
+                    return main_cpu_with_settings(width, height, num_frames, samples, output_file);
+                }
+            }
+        } else {
+            match renderer.render(
+                width,
+                height,
+                samples,
+                [0.0, 1.0, 0.0],
+                [0.0, 0.5, 5.0],
+                60.0,
+                &spheres_data,
+                &planes_data,
+                &lights_data,
+                background_color,
+            ) {
+                Ok(img) => img,
+                Err(e) => {
+                    eprintln!("GPU rendering failed: {}", e);
+                    eprintln!("Falling back to CPU rendering...");
+                    return main_cpu_with_settings(width, height, num_frames, samples, output_file);
+                }
+            }
+        };
 
         let mut frame_buffer = RgbaImage::new(width, height);
         for (x, y, pixel) in frame_buffer.enumerate_pixels_mut() {
@@ -329,5 +377,7 @@ async fn main_gpu() {
         encoder.write_frame(&gif_frame).unwrap();
     }
 
+    let mem_info = renderer.memory_info();
+    println!("Peak GPU memory usage: {:.1}MB", mem_info.peak_allocated_mb);
     println!("Animation saved as {}", output_file);
 }

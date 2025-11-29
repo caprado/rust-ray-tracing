@@ -20,25 +20,6 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn new() -> Scene {
-        Scene {
-            objects: Vec::new(),
-            lights: vec![Light {
-                position: Vector3D::new(0.0, 0.0, 0.0),
-                intensity: 1.0,
-            }],
-            background_color: Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-            },
-        }
-    }
-
-    pub fn add_light(&mut self, light: Light) {
-        self.lights.push(light);
-    }
-
     pub fn add_object(&mut self, object: Box<dyn Hittable>) {
         self.objects.push(object);
     }

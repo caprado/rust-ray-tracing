@@ -45,6 +45,31 @@ Run on GPU:
 cargo run --release -- --gpu
 ```
 
+Run with adaptive quality (progressive rendering):
+
+```bash
+cargo run --release -- --gpu --adaptive
+```
+
+## Production Features
+
+**Error handling & fallback:**
+
+- GPU renderer returns `Result<GpuRenderer, GpuError>` instead of panicking
+- Automatically falls back to CPU if GPU is unavailable or initialization fails
+- Graceful degradation instead of crashes
+
+**Memory profiling:**
+
+- Tracks GPU memory allocation per frame
+- Reports peak memory usage after rendering
+
+**Adaptive quality:**
+
+- Progressive rendering: 1→2→4→8→16 samples
+- Provides quick preview before full quality
+- Enable with `--adaptive` flag
+
 ## Implementation Notes
 
 **GPU specifics:**
@@ -61,12 +86,19 @@ cargo run --release -- --gpu
 - Use fastrand instead of thread_rng (way faster for simple random floats)
 - Shadow ray calculations use squared distance until necessary to avoid extra sqrt calls
 
-**Things I learned:**
+**Design decisions:**
 
-- GPU alignment requirements are annoying (hence all the padding in the structs)
-- The performance gap between CPU and GPU for embarrassingly parallel workloads is crazy
-- WGSL reserved keywords will bite you (spent 20 minutes debugging "target" being a reserved word)
-- Blinn-Phong halfway vector approach is noticeably easier than full Phong reflections
+- **GPU alignment:** All structs padded to 16-byte boundaries for GPU memory layout requirements
+- **Error handling:** Used `Result<T, E>` throughout GPU code to enable fallback instead of panic-on-failure
+- **Memory tracking:** Calculate buffer sizes upfront to report memory usage before allocation
+- **Progressive rendering:** Rerender at increasing quality levels rather than accumulating samples (simpler, more visual feedback)
+
+**What I learned:**
+
+- GPU fallback is critical since not all computers have discrete GPUs
+- Memory profiling helps identify resolution limits before hitting OOM errors
+- Progressive rendering gives better UX than a single long wait
+- WGSL reserved keywords (spent 20 minutes figuring out "target" is a reserved word)
 
 ## Possible Extensions
 
